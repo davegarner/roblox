@@ -510,11 +510,16 @@ try {
                     continue
                 }
                 if ($DryRun) {
-                    Write-Info "DRY RUN: rokit add --global $($t.Spec)"
+                    Write-Info "DRY RUN: rokit trust $($t.Spec); rokit add --global $($t.Spec)"
                     Add-Result $t.Cmd 'dry-run' $t.Spec
                     continue
                 }
                 Write-Info "rokit add --global $($t.Spec) ..."
+                # Rokit asks "Trust and install ...?" the first time it sees a tool, and fails
+                # instead when it cannot ask (its output is captured here). This script chose these
+                # tools, so trust them up front: the same as answering yes. Trust is per user, so it
+                # also covers the project's `rokit add` below.
+                $null = Invoke-Native 'rokit' @('trust', $t.Spec)
                 $r = Invoke-Native 'rokit' @('add', '--global', $t.Spec)
                 Update-SessionPath
                 if (Test-Command $t.Cmd) {

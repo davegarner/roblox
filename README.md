@@ -216,6 +216,7 @@ The habits below cost minutes and pay for themselves within a week.
 |---|---|
 | `claude` is not recognised | Open a **new** terminal. Still broken? Check `C:\Users\<you>\.local\bin\claude.exe` exists and that folder is on your user PATH. Or run `winget install Anthropic.ClaudeCode`. |
 | `rojo` or `rokit` not recognised | Same: new terminal. Rokit installs to `C:\Users\<you>\.rokit\bin`. On Windows, Rokit may ask for a full restart. If the setup log says Rokit failed, the `rokit self-install` lines just above the `[FAIL]` say why. |
+| rokit: "The following tool has not been marked as trusted" | Rokit asks before installing a tool the first time, and gives this error when it cannot ask. Run the `rokit add ...` command yourself in a terminal and answer yes, or run `rokit trust <owner/tool>` first. |
 | Roblox Studio: "Installer hash does not match" (winget exit code -1978335215) | winget's catalog entry is behind Roblox's latest installer. The script then downloads Roblox's signed installer itself. If that also fails, install Studio from https://create.roblox.com and re-run. |
 | `winget` is not recognised | Microsoft Store > search "App Installer" > Update. Then re-run. |
 | "running scripts is disabled on this system" | Use `Run-Setup.cmd`, or the `-ExecutionPolicy Bypass` command above. |
