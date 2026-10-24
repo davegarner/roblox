@@ -215,7 +215,7 @@ The habits below cost minutes and pay for themselves within a week.
 | Symptom | Fix |
 |---|---|
 | `claude` is not recognised | Open a **new** terminal. Still broken? Check `C:\Users\<you>\.local\bin\claude.exe` exists and that folder is on your user PATH. Or run `winget install Anthropic.ClaudeCode`. |
-| `rojo` or `rokit` not recognised | Same: new terminal. Rokit installs to `C:\Users\<you>\.rokit\bin`. On Windows, Rokit may ask for a full restart. If the setup log says Rokit failed, the `rokit self-install` lines just above the `[FAIL]` say why. |
+| `rojo` or `rokit` not recognised | Same: new terminal. Rokit installs to `C:\Users\<you>\.rokit\bin`. On Windows, Rokit may ask for a full restart. If the setup log says Rokit failed, the `rokit self-install` lines just above the red `×` line say why. |
 | rokit: "The following tool has not been marked as trusted" | Rokit asks before installing a tool the first time, and gives this error when it cannot ask. Run the `rokit add ...` command yourself in a terminal and answer yes, or run `rokit trust <owner/tool>` first. |
 | Roblox Studio: "Installer hash does not match" (winget exit code -1978335215) | winget's catalog entry is behind Roblox's latest installer. The script then downloads Roblox's signed installer itself. If that also fails, install Studio from https://create.roblox.com and re-run. |
 | `winget` is not recognised | Microsoft Store > search "App Installer" > Update. Then re-run. |
@@ -227,7 +227,7 @@ The habits below cost minutes and pay for themselves within a week.
 | `graphify` or `uv` not recognised | New terminal. In VS Code's terminal, quit and reopen VS Code. Still broken? Sign out of Windows and back in. uv and its tools live in `C:\Users\<you>\.local\bin`; run `uv tool update-shell` if that folder is still missing from PATH. |
 | graphify: "Microsoft Visual C++ 14.0 or greater is required" | uv picked a Python too new for graphify's `tree-sitter` dependency. Run `uv tool install --python 3.13 graphifyy`, then `graphify install --platform windows`. Re-running the setup script does this for you. |
 | `/journal` is not in the `/` menu | Start `claude` from inside the project folder; project skills only load there. Check `.claude\skills\journal\SKILL.md` exists. |
-| Setup failed half way | Read the `[FAIL]` line and the log in `roblox-dev-setup-logs\`. Fix the cause, re-run; done steps are skipped. |
+| Setup failed half way | Read the red `×` lines and the log in `roblox-dev-setup-logs\`. Fix the cause, re-run; done steps are skipped. |
 
 ## Optional extras, once the basics feel comfortable
 

@@ -7,6 +7,7 @@ REM Options can be passed on the command line, for example:
 REM   Run-Setup.cmd -DryRun
 REM   Run-Setup.cmd -ProjectName obby-game -Skip Node
 setlocal
+title Roblox + Claude Code setup
 cd /d "%~dp0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Setup-RobloxDev.ps1" %*
 set "RC=%ERRORLEVEL%"

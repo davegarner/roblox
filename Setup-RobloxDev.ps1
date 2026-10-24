@@ -113,15 +113,160 @@ $VsCodeExtensions = @(
 )
 
 # ---------------------------------------------------------------------------
-# Output and bookkeeping helpers
+# Console output
 # ---------------------------------------------------------------------------
-$script:Results = New-Object System.Collections.Generic.List[object]
+# This file is plain ASCII, which Windows PowerShell 5.1 reads correctly without a byte-order
+# mark, so the box-drawing and marker glyphs are built from their code points. All of them are
+# in the classic console character set (CP437), so every console font draws them.
+$Glyph = @{
+    H    = [string][char]0x2500; V    = [string][char]0x2502   # light line, horizontal / vertical
+    TL   = [string][char]0x250C; BL   = [string][char]0x2514   # light corners, left side
+    DH   = [string][char]0x2550; DV   = [string][char]0x2551   # double line, horizontal / vertical
+    DTL  = [string][char]0x2554; DTR  = [string][char]0x2557   # double corners, top
+    DBL  = [string][char]0x255A; DBR  = [string][char]0x255D   # double corners, bottom
+    DLT  = [string][char]0x2560; DRT  = [string][char]0x2563   # double tees, left / right
+    Ok   = [string][char]0x221A                                # square root sign, reads as a tick
+    Bad  = [string][char]0x00D7                                # multiplication sign
+    Dot  = [string][char]0x2022                                # bullet
+    Skip = [string][char]0x00BB                                # double angle quote, "moved past"
+    Play = [string][char]0x25BA                                # right-pointing pointer
+}
 
-function Write-Step([string]$Title) { Write-Host ''; Write-Host "==> $Title" -ForegroundColor Cyan }
-function Write-Info([string]$Msg)   { Write-Host "    $Msg" }
-function Write-Ok([string]$Msg)     { Write-Host "    [OK]   $Msg" -ForegroundColor Green }
-function Write-Warn2([string]$Msg)  { Write-Host "    [WARN] $Msg" -ForegroundColor Yellow }
-function Write-Fail([string]$Msg)   { Write-Host "    [FAIL] $Msg" -ForegroundColor Red }
+# Rules and boxes are drawn to the console width, within limits. Non-console hosts throw here.
+$script:Width = 80
+try { $script:Width = [Math]::Max(64, [Math]::Min(100, $Host.UI.RawUI.WindowSize.Width - 1)) } catch { }
+
+$script:Results   = New-Object System.Collections.Generic.List[object]
+$script:Started   = Get-Date
+$script:StepIndex = 0
+$script:StepTotal = 0   # set once $Skip is known
+
+# A line of output is a list of pieces; a piece is @('text', 'Colour') or a plain string.
+# A list with a single piece needs the unary comma, @(, @('text', 'Colour')): in PowerShell
+# @( <array> ) is that same array, not an array holding it.
+#
+# Colour goes to the console through the Console API and the plain text of each finished line
+# goes to the log file. Start-Transcript is not used: Windows PowerShell 5.1 would log every
+# coloured piece on a line of its own.
+$script:IsConsole = ($Host.Name -eq 'ConsoleHost')
+$script:DefaultColour = if ($script:IsConsole) { [Console]::ForegroundColor } else { 'Gray' }
+$script:Log = $null
+function Write-Parts([object[]]$Parts) {
+    $plain = New-Object System.Text.StringBuilder
+    foreach ($p in $Parts) {
+        if ($p -is [array]) { $text = "$($p[0])"; $colour = "$($p[1])" } else { $text = "$p"; $colour = '' }
+        $null = $plain.Append($text)
+        if ($script:IsConsole) {
+            if ($colour) { [Console]::ForegroundColor = $colour }
+            [Console]::Write($text)
+            if ($colour) { [Console]::ForegroundColor = $script:DefaultColour }
+        }
+        elseif ($colour) { Write-Host $text -NoNewline -ForegroundColor $colour }
+        else { Write-Host $text -NoNewline }
+    }
+    if ($script:IsConsole) { [Console]::WriteLine() } else { Write-Host '' }
+    if ($script:Log) { $script:Log.WriteLine($plain.ToString().TrimEnd()) }
+}
+# For the log file only (run header and footer).
+function Write-LogOnly([string]$Text) {
+    if ($script:Log) { $script:Log.WriteLine($Text) }
+}
+
+# Visible length of a list of pieces, for padding.
+function Get-PartsLength([object[]]$Parts) {
+    $n = 0
+    foreach ($p in $Parts) { if ($p -is [array]) { $n += "$($p[0])".Length } else { $n += "$p".Length } }
+    return $n
+}
+
+# Shortens a path to fit, keeping both ends: C:\Users\dav...\my-first-game
+function Format-Fit([string]$Text, [int]$Max) {
+    if ($Text.Length -le $Max) { return $Text }
+    if ($Max -lt 8) { return $Text.Substring(0, [Math]::Max(0, $Max)) }
+    $head = [int][Math]::Floor(($Max - 3) / 2)
+    $tail = $Max - 3 - $head
+    return $Text.Substring(0, $head) + '...' + $Text.Substring($Text.Length - $tail)
+}
+# Shortens a sentence to fit, keeping the start: Luau autocomplete, type chec...
+function Format-Clip([string]$Text, [int]$Max) {
+    if ($Text.Length -le $Max) { return $Text }
+    if ($Max -lt 4) { return $Text.Substring(0, [Math]::Max(0, $Max)) }
+    return $Text.Substring(0, $Max - 3) + '...'
+}
+# Wraps a sentence at spaces so it fits the width; a single over-long word is cut.
+function Split-Wrapped([string]$Text, [int]$Max) {
+    if ($Text.Length -le $Max) { return , $Text }
+    $lines = @()
+    $line = ''
+    foreach ($word in ($Text -split ' ')) {
+        if ($line.Length -eq 0) { $line = $word }
+        elseif (($line.Length + 1 + $word.Length) -le $Max) { $line += ' ' + $word }
+        else { $lines += $line; $line = $word }
+        while ($line.Length -gt $Max) { $lines += $line.Substring(0, $Max); $line = $line.Substring($Max) }
+    }
+    if ($line.Length -gt 0) { $lines += $line }
+    return $lines
+}
+
+# Double-lined box, full width: edges ('top', 'middle', 'bottom') and padded rows.
+function Write-BoxEdge([string]$Kind, [string]$Border) {
+    $inner = $Glyph.DH * ($script:Width - 2)
+    $line = switch ($Kind) {
+        'top'    { "$($Glyph.DTL)$inner$($Glyph.DTR)" }
+        'middle' { "$($Glyph.DLT)$inner$($Glyph.DRT)" }
+        'bottom' { "$($Glyph.DBL)$inner$($Glyph.DBR)" }
+    }
+    Write-Parts @(, @($line, $Border))
+}
+function Write-BoxRow([object[]]$Parts, [string]$Border) {
+    $inner = $script:Width - 4
+    $over = (Get-PartsLength $Parts) - $inner
+    if ($over -gt 0) {
+        # Too long for the box: clip the last piece rather than break the right edge.
+        $last = $Parts[-1]
+        if ($last -is [array]) { $Parts[-1] = @((Format-Clip $last[0] ($last[0].Length - $over)), $last[1]) }
+        else { $Parts[-1] = Format-Clip "$last" ("$last".Length - $over) }
+    }
+    $pad = $inner - (Get-PartsLength $Parts)
+    # Note the extra parentheses: in PowerShell the comma binds tighter than +.
+    Write-Parts (@(, @("$($Glyph.DV)  ", $Border)) + $Parts + @(, @(((' ' * $pad) + " $($Glyph.DV)"), $Border)))
+}
+
+# Section header: a light rule with the title set into it, and an optional grey "why" line.
+#   +- 3/12 Roblox Studio ----------------------------------------
+#   |   The Roblox game engine and editor
+function Write-Section([object[]]$TitleParts, [string]$Why = '') {
+    $lead = @(, @("$($Glyph.TL)$($Glyph.H) ", 'DarkCyan')) + $TitleParts
+    $fill = [Math]::Max(0, $script:Width - (Get-PartsLength $lead) - 1)
+    Write-Parts @()
+    Write-Parts ($lead + @(, @((' ' + ($Glyph.H * $fill)), 'DarkCyan')))
+    if ($Why) { Write-Body ' ' 'DarkGray' $Why 'DarkGray' }
+}
+function Write-Step([string]$Title, [string]$Why = '') {
+    $script:StepIndex++
+    Write-Section @( @("$($script:StepIndex)/$($script:StepTotal)", 'DarkCyan'), @(" $Title", 'White') ) $Why
+}
+
+# Body lines sit under the header, behind the rail:   |   v  message
+# Long lines wrap to the console width; the mark goes on the first line only.
+function Write-Body([string]$Mark, [string]$MarkColour, [string]$Msg, [string]$Colour) {
+    if ([string]::IsNullOrWhiteSpace($Msg)) { return }
+    $first = $true
+    foreach ($raw in ($Msg -split "`r?`n")) {
+        foreach ($line in (Split-Wrapped $raw.TrimEnd() ($script:Width - 6))) {
+            $m = if ($first) { $Mark } else { ' ' }
+            Write-Parts @( @("$($Glyph.V) ", 'DarkCyan'), @(" $m  ", $MarkColour), @($line, $Colour) )
+            $first = $false
+        }
+    }
+}
+function Write-Info([string]$Msg) {
+    if ($Msg -like 'DRY RUN: *') { Write-Body $Glyph.Dot 'Cyan' $Msg.Substring(9) 'DarkCyan' }
+    else { Write-Body ' ' 'Gray' $Msg 'Gray' }
+}
+function Write-Ok([string]$Msg)    { Write-Body $Glyph.Ok  'Green'  $Msg 'White' }
+function Write-Warn2([string]$Msg) { Write-Body '!'        'Yellow' $Msg 'Yellow' }
+function Write-Fail([string]$Msg)  { Write-Body $Glyph.Bad 'Red'    $Msg 'Red' }
 
 function Add-Result([string]$Step, [string]$Status, [string]$Detail) {
     $script:Results.Add([pscustomobject]@{ Step = $Step; Status = $Status; Detail = $Detail })
@@ -157,7 +302,7 @@ function Get-OutputTail([string]$Text, [int]$Lines = 6) {
     $all = $Text.Split([char[]]@("`r", "`n"), [StringSplitOptions]::RemoveEmptyEntries) | Where-Object {
         ($_ -notmatch '^[\s\-\\|/]*$') -and ($_ -notmatch '(\d+%|[\d.]+ [KMG]?B / [\d.]+ [KMG]?B)\s*$')
     }
-    return ((@($all) | Select-Object -Last $Lines) -join "`n    ")
+    return ((@($all) | Select-Object -Last $Lines) -join "`n")
 }
 
 # Installers add themselves to the registry PATH, but this process keeps its old copy.
@@ -343,11 +488,17 @@ function Install-Rokit {
 $exitCode = 0
 $logDir  = Join-Path $env:USERPROFILE 'roblox-dev-setup-logs'
 $logFile = Join-Path $logDir ('setup-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-$transcriptStarted = $false
 try {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    Start-Transcript -Path $logFile -Append | Out-Null
-    $transcriptStarted = $true
+    # UTF-8 with a byte-order mark, so Notepad shows the box-drawing characters correctly.
+    $script:Log = New-Object System.IO.StreamWriter($logFile, $true, (New-Object System.Text.UTF8Encoding($true)))
+    $script:Log.AutoFlush = $true
+    Write-LogOnly 'Roblox + Claude Code setup'
+    Write-LogOnly "Started    $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    Write-LogOnly "User       $env:USERDOMAIN\$env:USERNAME on $env:COMPUTERNAME"
+    Write-LogOnly "Script     $PSCommandPath"
+    Write-LogOnly "Options    ProjectName=$ProjectName  ProjectRoot=$ProjectRoot  Skip=$($Skip -join ',')  DryRun=$DryRun"
+    Write-LogOnly "PowerShell $($PSVersionTable.PSVersion)  host $($Host.Name)"
 }
 catch {
     Write-Warn2 "Could not start a log file ($($_.Exception.Message)). Continuing without one."
@@ -360,18 +511,30 @@ foreach ($step in $AllSteps) {
     $Do[$step] = -not ($Skip -contains $step)
 }
 
-Write-Host ''
-Write-Host '  Roblox + Claude Code development setup' -ForegroundColor Magenta
-Write-Host '  ======================================' -ForegroundColor Magenta
-if ($DryRun) { Write-Host '  DRY RUN: nothing will be installed or written.' -ForegroundColor Yellow }
-if ($Skip.Count -gt 0) { Write-Host "  Skipping: $($Skip -join ', ')" -ForegroundColor Yellow }
-Write-Host "  Log: $logFile"
-
+$script:StepTotal = 1 + @($AllSteps | Where-Object { $Do[$_] }).Count   # preflight + enabled steps
 $projectPath = Join-Path $ProjectRoot $ProjectName
+
+# Title banner.
+$inner = $script:Width - 4
+Write-Parts @()
+Write-BoxEdge 'top' 'Magenta'
+Write-BoxRow @( @("$($Glyph.Play)  ", 'Magenta'), @('ROBLOX', 'Red'), @('  +  ', 'DarkGray'), @('CLAUDE CODE', 'DarkYellow') ) 'Magenta'
+Write-BoxRow @(, @('   Developer setup for Windows', 'Gray')) 'Magenta'
+Write-BoxEdge 'middle' 'Magenta'
+Write-BoxRow @( @('Project   ', 'DarkGray'), @((Format-Fit $projectPath ($inner - 10)), 'White') ) 'Magenta'
+Write-BoxRow @( @('Log       ', 'DarkGray'), @((Format-Fit $logFile ($inner - 10)), 'Gray') ) 'Magenta'
+if ($Skip.Count -gt 0) {
+    Write-BoxRow @( @('Skipping  ', 'DarkGray'), @((Format-Fit ($Skip -join ', ') ($inner - 10)), 'Yellow') ) 'Magenta'
+}
+if ($DryRun) {
+    Write-BoxRow @( @('Mode      ', 'DarkGray'), @('DRY RUN: nothing will be installed or written', 'Yellow') ) 'Magenta'
+}
+Write-BoxRow @(, @("$($script:StepTotal) steps. Safe to run again: anything already installed is skipped.", 'DarkGray')) 'Magenta'
+Write-BoxEdge 'bottom' 'Magenta'
 
 try {
     # -----------------------------------------------------------------------
-    Write-Step 'Preflight checks'
+    Write-Step 'Preflight checks' 'Windows version, winget and internet access'
     # -----------------------------------------------------------------------
     $os = Get-CimInstance Win32_OperatingSystem
     $build = [int]$os.BuildNumber
@@ -406,15 +569,15 @@ try {
     # Core applications via winget
     # -----------------------------------------------------------------------
     if ($Do.Git) {
-        Write-Step 'Git for Windows (version control; Claude Code uses its Bash shell)'
+        Write-Step 'Git for Windows' 'Version control. Claude Code also uses its Bash shell.'
         $null = Install-WingetPackage 'Git.Git' 'Git for Windows'
     }
     if ($Do.VSCode) {
-        Write-Step 'Visual Studio Code (code editor)'
+        Write-Step 'Visual Studio Code' 'The code editor'
         $null = Install-WingetPackage 'Microsoft.VisualStudioCode' 'Visual Studio Code'
     }
     if ($Do.Studio) {
-        Write-Step 'Roblox Studio (the Roblox game editor)'
+        Write-Step 'Roblox Studio' 'The Roblox game engine and editor'
         if (Test-RobloxStudioInstalled) {
             Write-Ok 'Roblox Studio is already installed'
             Add-Result 'Roblox Studio' 'present' 'Roblox.RobloxStudio'
@@ -425,14 +588,14 @@ try {
         }
     }
     if ($Do.Node) {
-        Write-Step 'Node.js LTS (used by many MCP servers and developer tools)'
+        Write-Step 'Node.js LTS' 'Used by many MCP servers and developer tools'
         $null = Install-WingetPackage 'OpenJS.NodeJS.LTS' 'Node.js LTS'
     }
     Update-SessionPath
 
     # -----------------------------------------------------------------------
     if ($Do.Claude) {
-        Write-Step 'Claude Code (Anthropic terminal coding agent)'
+        Write-Step 'Claude Code' "Anthropic's terminal coding agent"
         if (Test-Command claude) {
             $v = (Invoke-Native 'claude' @('--version')).Output.Trim()
             Write-Ok "Claude Code is already installed ($v)"
@@ -470,7 +633,7 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Do.Rokit) {
-        Write-Step 'Rokit (installs and pins Roblox command-line tools)'
+        Write-Step 'Rokit' 'Installs and version-pins the Roblox command-line tools'
         if (Test-Command rokit) {
             Write-Ok "Rokit is already installed ($((Invoke-Native 'rokit' @('--version')).Output.Trim()))"
             Add-Result 'Rokit' 'present' ''
@@ -500,7 +663,7 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Do.Tools) {
-        Write-Step 'Rojo, StyLua, Selene (rokit add --global)'
+        Write-Step 'Rojo, StyLua, Selene' 'File sync into Studio, code formatter, linter (rokit add --global)'
         $canInstallTools = $DryRun -or (Test-Command rokit)
         if ($canInstallTools) {
             foreach ($t in $RokitTools) {
@@ -541,7 +704,7 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Do.Extensions) {
-        Write-Step 'VS Code extensions'
+        Write-Step 'VS Code extensions' 'Claude Code, Luau language support, Rojo, StyLua, Selene, roblox-ui'
         Update-SessionPath
         $canInstallExtensions = $DryRun -or (Test-Command code)
         if ($canInstallExtensions) {
@@ -583,7 +746,7 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Do.Plugin) {
-        Write-Step 'Rojo plugin for Roblox Studio'
+        Write-Step 'Rojo plugin for Roblox Studio' 'The Studio side of the file sync'
         if ($DryRun) {
             Write-Info 'DRY RUN: rojo plugin install'
             Add-Result 'Rojo Studio plugin' 'dry-run' ''
@@ -608,7 +771,7 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Do.Skills) {
-        Write-Step 'Claude Code skill: graphify (knowledge graph of your project, saves re-reading files)'
+        Write-Step 'Claude Code skill: graphify' 'A knowledge graph of your project, so Claude does not re-read every file'
         # uv tools (graphify) go in %USERPROFILE%\.local\bin, the folder Claude Code uses too.
         $uvBin = Join-Path $env:USERPROFILE '.local\bin'
         if (Test-Command uv) {
@@ -683,7 +846,7 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Do.Project) {
-        Write-Step "First project: $projectPath"
+        Write-Step 'First project' $projectPath
         if (Test-Path $projectPath) {
             Write-Ok 'Project folder already exists; leaving it untouched'
             Add-Result 'Project' 'present' $projectPath
@@ -805,51 +968,132 @@ try {
     }
 }
 catch {
-    Write-Host ''
+    Write-Parts @()
     Write-Fail "Setup stopped: $($_.Exception.Message)"
     Add-Result 'Setup' 'STOPPED' $_.Exception.Message
     $exitCode = 1
 }
 
 # ---------------------------------------------------------------------------
-Write-Step 'Summary'
+# Summary: one row per result, then a verdict box
 # ---------------------------------------------------------------------------
-$script:Results | Format-Table -AutoSize -Property Step, Status, Detail | Out-String -Width 200 | Write-Host
+Write-Section @(, @('Summary', 'Magenta'))
 
-$failed = @($script:Results | Where-Object { $_.Status -in 'FAILED', 'STOPPED' })
+# How each result status is shown: mark, colour, label.
+$statusStyle = @{
+    installed = @($Glyph.Ok,   'Green',     'installed')
+    created   = @($Glyph.Ok,   'Green',     'created')
+    present   = @($Glyph.Ok,   'DarkGreen', 'already there')
+    'dry-run' = @($Glyph.Dot,  'Cyan',      'dry run')
+    SKIPPED   = @($Glyph.Skip, 'Yellow',    'skipped')
+    FAILED    = @($Glyph.Bad,  'Red',       'FAILED')
+    STOPPED   = @($Glyph.Bad,  'Red',       'STOPPED')
+}
+$stepWidth = 4
+foreach ($r in $script:Results) { $stepWidth = [Math]::Max($stepWidth, $r.Step.Length) }
+$stepWidth   = [Math]::Min($stepWidth, 28)
+$detailWidth = [Math]::Max(10, $script:Width - $stepWidth - 23)
+foreach ($r in $script:Results) {
+    $s = $statusStyle[$r.Status]
+    if (-not $s) { $s = @($Glyph.Dot, 'Gray', $r.Status) }
+    Write-Parts @(
+        @("$($Glyph.V)  ", 'DarkCyan'),
+        @($s[0], $s[1]),
+        @(('  ' + (Format-Clip $r.Step $stepWidth).PadRight($stepWidth) + '  '), 'White'),
+        @($s[2].PadRight(15), $s[1]),
+        @((Format-Clip "$($r.Detail)" $detailWidth), 'DarkGray')
+    )
+}
+
+# Totals line: "12 items in 4m 07s:  9 installed . 2 already there . 1 FAILED"
+$failed  = @($script:Results | Where-Object { $_.Status -in 'FAILED', 'STOPPED' })
+$elapsed = (Get-Date) - $script:Started
+$elapsedText = if ($elapsed.TotalMinutes -ge 1) { '{0}m {1:d2}s' -f [int][Math]::Floor($elapsed.TotalMinutes), $elapsed.Seconds }
+               else { '{0}s' -f [int]$elapsed.TotalSeconds }
+$totals = @(, @("$($Glyph.BL)$($Glyph.H)$($Glyph.H) ", 'DarkCyan')) + @(, @("$($script:Results.Count) items in $elapsedText", 'Gray'))
+$sep = ':  '
+foreach ($status in 'installed', 'created', 'present', 'dry-run', 'SKIPPED', 'FAILED', 'STOPPED') {
+    $n = @($script:Results | Where-Object { $_.Status -eq $status }).Count
+    if ($n -eq 0) { continue }
+    $s = $statusStyle[$status]
+    $totals += , @($sep, 'DarkGray')
+    $totals += , @("$n $($s[2])", $s[1])
+    $sep = "  $($Glyph.Dot)  "
+}
+Write-Parts $totals
+
+Write-Parts @()
 if ($failed.Count -gt 0) {
-    Write-Warn2 "$($failed.Count) step(s) failed. Fix the cause (see messages above and the log), then re-run this script; completed steps are skipped."
+    $names = ($failed | ForEach-Object { $_.Step }) -join ', '
+    Write-BoxEdge 'top' 'Yellow'
+    Write-BoxRow @( @("$($Glyph.Bad)  ", 'Red'), @("$($failed.Count) step(s) need attention:  ", 'Yellow'), @($names, 'White') ) 'Yellow'
+    Write-BoxRow @(, @('   Fix the cause shown in red above, then run this again.', 'Gray')) 'Yellow'
+    Write-BoxRow @(, @('   Steps that finished are skipped.', 'Gray')) 'Yellow'
+    Write-BoxEdge 'bottom' 'Yellow'
     $exitCode = 1
 }
+elseif ($DryRun) {
+    Write-BoxEdge 'top' 'Cyan'
+    Write-BoxRow @( @("$($Glyph.Dot)  ", 'Cyan'), @('Dry run complete.  ', 'White'), @('Nothing was installed or written.', 'Gray') ) 'Cyan'
+    Write-BoxEdge 'bottom' 'Cyan'
+}
 else {
-    Write-Ok 'All steps completed.'
+    Write-BoxEdge 'top' 'Green'
+    Write-BoxRow @( @("$($Glyph.Ok)  ", 'Green'), @('All set!  ', 'White'), @('Everything is installed and your first project is ready.', 'Gray') ) 'Green'
+    Write-BoxEdge 'bottom' 'Green'
 }
 
-Write-Host ''
-Write-Host '  What to do next' -ForegroundColor Magenta
-Write-Host '  ---------------' -ForegroundColor Magenta
+# ---------------------------------------------------------------------------
+# What to do next
+# ---------------------------------------------------------------------------
+function Write-Next([int]$Number, [string]$Text) {
+    $lead = "  $Number".PadLeft(4) + '  '
+    foreach ($line in (Split-Wrapped $Text ($script:Width - 6))) {
+        Write-Parts @( @($lead, 'Cyan'), @($line, 'Gray') )
+        $lead = '      '
+    }
+}
+function Write-NextNote([string]$Text) {
+    foreach ($line in (Split-Wrapped $Text ($script:Width - 6))) {
+        Write-Parts @( '      ', @($line, 'DarkGray') )
+    }
+}
+function Write-NextCmd([string]$Command, [string]$Note = '') {
+    $parts = @( '      ', @("$($Glyph.Play) ", 'DarkCyan'), @($Command, 'White') )
+    if ($Note) { $parts += , @("   $Note", 'DarkGray') }
+    Write-Parts $parts
+}
+
+Write-Section @(, @('What to do next', 'Magenta'))
 if ($failed.Count -gt 0) {
-    Write-Host '  0. First fix the FAILED steps in the summary and run this script again. The steps below' -ForegroundColor Yellow
-    Write-Host '     that use rojo or the project folder only work once Rojo is installed.' -ForegroundColor Yellow
+    Write-Warn2 'First fix the failed steps and run this script again. Steps 4 to 8 need Rojo and the project folder.'
 }
-Write-Host '  1. Open Roblox Studio from the Start menu and log in (a free Roblox account is enough).'
-Write-Host '  2. Open a NEW terminal window so the PATH changes apply: Start menu > "Terminal".'
-Write-Host '     Using the terminal inside VS Code? Quit VS Code completely and reopen it.'
-Write-Host '     Still "not recognized"? Sign out of Windows and back in.'
-Write-Host '  3. Run:   claude        then follow the browser login. Claude Code needs a Claude Pro or Max subscription.'
-Write-Host "  4. Run:   cd `"$projectPath`""
-Write-Host '            rojo serve    and leave it running.'
-Write-Host "  5. In Studio: File > Open from File > $projectPath\$ProjectName.rbxlx"
-Write-Host '     then Plugins tab > Rojo > Connect.'
-Write-Host '  6. In a second terminal in the project folder run:   claude'
-Write-Host '     and ask: "Read CLAUDE.md and explain how this project is set up."'
-Write-Host '  7. In Studio press Play (F5). View > Output should show "Hello world, from server!".'
-Write-Host '  8. Once the project has a few scripts, type in claude:   /graphify .'
-Write-Host '     then ask questions with:   /graphify query "how does scoring work"'
-Write-Host '  9. End every session with:   /journal'
-Write-Host ''
-Write-Host "  Full log: $logFile"
-Write-Host ''
+Write-Parts @()
+Write-Next 1 'Open Roblox Studio from the Start menu and log in.'
+Write-NextNote 'A free Roblox account is enough.'
+Write-Next 2 'Open a NEW terminal window so the PATH changes apply: Start menu > Terminal.'
+Write-NextNote 'Using the terminal inside VS Code? Quit VS Code completely and reopen it.'
+Write-NextNote 'Still "not recognized"? Sign out of Windows and back in.'
+Write-Next 3 'Log in to Claude Code. It needs a Claude Pro or Max subscription.'
+Write-NextCmd 'claude' 'then follow the browser login'
+Write-Next 4 'Start the file sync and leave it running.'
+Write-NextCmd "cd `"$projectPath`""
+Write-NextCmd 'rojo serve'
+Write-Next 5 "In Studio: File > Open from File > $ProjectName.rbxlx (in the project folder), then Plugins tab > Rojo > Connect."
+Write-Next 6 'In a second terminal, in the project folder, start Claude and ask it about the project.'
+Write-NextCmd 'claude' 'then ask: "Read CLAUDE.md and explain how this project is set up."'
+Write-Next 7 'Press Play (F5) in Studio. View > Output should show "Hello world, from server!".'
+Write-Next 8 'Once the project has a few scripts, build its knowledge graph inside claude and ask questions through it.'
+Write-NextCmd '/graphify .'
+Write-NextCmd '/graphify query "how does scoring work"'
+Write-Next 9 'End every session by writing up what you learned.'
+Write-NextCmd '/journal'
+Write-Parts @()
+Write-Parts @( @('  Full log  ', 'DarkGray'), @($logFile, 'Gray') )
+Write-Parts @()
 
-if ($transcriptStarted) { Stop-Transcript | Out-Null }
+if ($script:Log) {
+    Write-LogOnly "Finished   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  exit code $exitCode"
+    $script:Log.Close()
+}
 exit $exitCode
