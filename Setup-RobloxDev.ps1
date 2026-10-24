@@ -83,9 +83,18 @@ if ($unknownSteps.Count -gt 0) {
 # Constants
 # ---------------------------------------------------------------------------
 $ClaudeInstallUrl = 'https://claude.ai/install.ps1'
-$RokitInstallUrl  = 'https://raw.githubusercontent.com/rojo-rbx/rokit/main/scripts/install.ps1'
+$UvInstallUrl     = 'https://astral.sh/uv/install.ps1'
+$RokitReleaseApi  = 'https://api.github.com/repos/rojo-rbx/rokit/releases/latest'
+# Roblox's own "latest" Studio installer: the same file winget's Roblox.RobloxStudio entry points at.
+$StudioInstallerUrl = 'https://setup.rbxcdn.com/RobloxStudioInstaller.exe'
+# winget exit code 0x8A150011: the downloaded installer does not match the hash in winget's catalog.
+$WingetHashMismatch = -1978335215
 # Where `graphify install --platform windows` writes the Claude Code skill.
 $GraphifySkillFile = Join-Path $env:USERPROFILE '.claude\skills\graphify\SKILL.md'
+# Python for graphify. Its tree-sitter dependency only ships prebuilt Windows wheels for released
+# Python versions up to a point; left to itself uv picks the newest Python and then tries to
+# compile tree-sitter, which needs Microsoft's C++ Build Tools.
+$GraphifyPython = '3.13'
 
 # Command-line tools installed through Rokit. Spec is the GitHub owner/repo.
 $RokitTools = @(
@@ -129,7 +138,10 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $lines = & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+        # A blank stderr line arrives as an ErrorRecord whose text is "System.Management.Automation.RemoteException".
+        $lines = & $Exe @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
+        }
         $code = $LASTEXITCODE
     }
     finally {
@@ -138,9 +150,13 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     return [pscustomobject]@{ ExitCode = $code; Output = (@($lines) -join "`n") }
 }
 
+# Last few lines of a command's output, without winget's spinner (- \ | /) and
+# progress-bar ("1024 KB / 13.1 MB") lines.
 function Get-OutputTail([string]$Text, [int]$Lines = 6) {
     if ([string]::IsNullOrEmpty($Text)) { return '' }
-    $all = $Text.Split([char[]]@("`r", "`n"), [StringSplitOptions]::RemoveEmptyEntries)
+    $all = $Text.Split([char[]]@("`r", "`n"), [StringSplitOptions]::RemoveEmptyEntries) | Where-Object {
+        ($_ -notmatch '^[\s\-\\|/]*$') -and ($_ -notmatch '(\d+%|[\d.]+ [KMG]?B / [\d.]+ [KMG]?B)\s*$')
+    }
     return ((@($all) | Select-Object -Last $Lines) -join "`n    ")
 }
 
@@ -182,7 +198,9 @@ function Test-WingetInstalled([string]$Id) {
     return (($r.ExitCode -eq 0) -and ("$($r.Output)" -like "*$Id*"))
 }
 
-function Install-WingetPackage([string]$Id, [string]$Friendly) {
+# $HashMismatchFallback (optional) installs the package another way when winget's catalog
+# entry is out of date. It returns $true if that worked.
+function Install-WingetPackage([string]$Id, [string]$Friendly, [scriptblock]$HashMismatchFallback = $null) {
     if (Test-WingetInstalled $Id) {
         Write-Ok "$Friendly is already installed"
         Add-Result $Friendly 'present' $Id
@@ -202,6 +220,14 @@ function Install-WingetPackage([string]$Id, [string]$Friendly) {
         Write-Ok "$Friendly installed"
         Add-Result $Friendly 'installed' $Id
         return $true
+    }
+    if (($r.ExitCode -eq $WingetHashMismatch) -and $HashMismatchFallback) {
+        Write-Warn2 "winget's record of the $Friendly installer is out of date (installer hash does not match). Trying the vendor's own download ..."
+        if (& $HashMismatchFallback) {
+            Write-Ok "$Friendly installed"
+            Add-Result $Friendly 'installed' 'direct download (winget catalog out of date)'
+            return $true
+        }
     }
     Write-Fail "$Friendly did not install (winget exit code $($r.ExitCode))"
     Write-Info (Get-OutputTail $r.Output)
@@ -223,6 +249,92 @@ function Invoke-RemoteInstaller([string]$Url, [string]$Friendly) {
         Write-Info (Get-OutputTail $r.Output)
     }
     return $r
+}
+
+# ---------------------------------------------------------------------------
+# Installers that do not go through winget or an install.ps1
+# ---------------------------------------------------------------------------
+# Studio installs per user under %LOCALAPPDATA%\Roblox\Versions\<version>\ and registers an
+# uninstall entry in HKCU. winget does not always recognise a Studio it did not install itself.
+function Test-RobloxStudioInstalled {
+    $versions = Join-Path $env:LOCALAPPDATA 'Roblox\Versions'
+    if (Get-ChildItem -Path $versions -Filter 'RobloxStudioBeta.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1) {
+        return $true
+    }
+    $entries = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+    return [bool]($entries | Where-Object { $_.DisplayName -like 'Roblox Studio*' })
+}
+
+# winget's Roblox Studio entry points at Roblox's unversioned "latest" installer, so its recorded
+# hash goes stale every time Roblox updates that file. Download the same file, and check that it
+# carries Roblox's code signature instead.
+function Install-RobloxStudioDirect {
+    $ProgressPreference = 'SilentlyContinue'   # the 5.1 progress bar makes downloads very slow
+    $dir = Join-Path $env:TEMP ('roblox-studio-' + [guid]::NewGuid().ToString('N'))
+    $exe = Join-Path $dir 'RobloxStudioInstaller.exe'
+    try {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Write-Info "Downloading $StudioInstallerUrl ..."
+        Invoke-WebRequest -Uri $StudioInstallerUrl -OutFile $exe -UseBasicParsing
+        $sig = Get-AuthenticodeSignature -FilePath $exe
+        if (($sig.Status -ne 'Valid') -or ($sig.SignerCertificate.Subject -notlike 'CN=Roblox Corporation,*')) {
+            Write-Info "Not running it: the download is not validly signed by Roblox Corporation (signature: $($sig.Status))."
+            return $false
+        }
+        Write-Info 'Signed by Roblox Corporation. Running the installer; it shows its own progress window ...'
+        # Wait for the installer process only. It starts Studio when it finishes, and this
+        # script should carry on while Studio is open.
+        $p = Start-Process -FilePath $exe -PassThru
+        if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            Write-Info 'The Studio installer is still running after 20 minutes. Let it finish, then re-run this script.'
+            return $false
+        }
+        return (Test-RobloxStudioInstalled)
+    }
+    catch {
+        Write-Info "Direct download failed: $($_.Exception.Message)"
+        return $false
+    }
+    finally {
+        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Same steps as Rokit's own install.ps1 (download the latest release, run `rokit self-install`),
+# but keeps self-install's output and exit code, which install.ps1 throws away.
+function Install-Rokit {
+    $ProgressPreference = 'SilentlyContinue'
+    $dir = Join-Path $env:TEMP ('rokit-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Write-Info "Looking up the latest Rokit release ($RokitReleaseApi) ..."
+        $release = Invoke-RestMethod -Uri $RokitReleaseApi -Headers @{ 'X-GitHub-Api-Version' = '2022-11-28' }
+        # Rokit's install.ps1 also uses the x86_64 build on every PC; Windows on Arm runs it emulated.
+        $asset = @($release.assets | Where-Object { $_.name -like 'rokit-*-windows-x86_64.zip' }) | Select-Object -First 1
+        if (-not $asset) {
+            Write-Info "Rokit release $($release.tag_name) has no windows-x86_64 download."
+            return
+        }
+        Write-Info "Downloading $($asset.name) ..."
+        $zip = Join-Path $dir $asset.name
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath $dir -Force
+        $exe = Get-ChildItem -Path $dir -Filter 'rokit.exe' -Recurse | Select-Object -First 1
+        if (-not $exe) {
+            Write-Info "rokit.exe was not inside $($asset.name)."
+            return
+        }
+        Write-Info 'rokit self-install ...'
+        $r = Invoke-Native $exe.FullName @('self-install')
+        if ($r.ExitCode -ne 0) { Write-Warn2 "rokit self-install exited with code $($r.ExitCode)" }
+        Write-Info (Get-OutputTail $r.Output)
+    }
+    catch {
+        Write-Warn2 "Rokit download failed: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -303,8 +415,14 @@ try {
     }
     if ($Do.Studio) {
         Write-Step 'Roblox Studio (the Roblox game editor)'
-        Write-Info 'Studio may open itself when the install finishes. You can close it for now.'
-        $null = Install-WingetPackage 'Roblox.RobloxStudio' 'Roblox Studio'
+        if (Test-RobloxStudioInstalled) {
+            Write-Ok 'Roblox Studio is already installed'
+            Add-Result 'Roblox Studio' 'present' 'Roblox.RobloxStudio'
+        }
+        else {
+            Write-Info 'Studio may open itself when the install finishes. You can close it for now.'
+            $null = Install-WingetPackage 'Roblox.RobloxStudio' 'Roblox Studio' { Install-RobloxStudioDirect }
+        }
     }
     if ($Do.Node) {
         Write-Step 'Node.js LTS (used by many MCP servers and developer tools)'
@@ -358,19 +476,24 @@ try {
             Add-Result 'Rokit' 'present' ''
         }
         elseif ($DryRun) {
-            Write-Info "DRY RUN: irm $RokitInstallUrl | iex"
-            Add-Result 'Rokit' 'dry-run' 'install.ps1'
+            Write-Info 'DRY RUN: download the latest Rokit release from GitHub; rokit self-install'
+            Add-Result 'Rokit' 'dry-run' 'rokit self-install'
         }
         else {
-            $null = Invoke-RemoteInstaller $RokitInstallUrl 'Rokit'
+            Install-Rokit
+            # self-install normally adds this folder to PATH itself; make sure.
+            $rokitBin = Join-Path $env:USERPROFILE '.rokit\bin'
+            if (Test-Path (Join-Path $rokitBin 'rokit.exe')) {
+                if (Add-UserPath $rokitBin) { Write-Info "Added $rokitBin to your PATH" }
+            }
             Update-SessionPath
             if (Test-Command rokit) {
                 Write-Ok "Rokit installed ($((Invoke-Native 'rokit' @('--version')).Output.Trim()))"
                 Add-Result 'Rokit' 'installed' ''
             }
             else {
-                Write-Fail 'Rokit is not on PATH. Expected %USERPROFILE%\.rokit\bin\rokit.exe'
-                Add-Result 'Rokit' 'FAILED' 'not found after install'
+                Write-Fail "Rokit did not install: $rokitBin\rokit.exe is missing. See the messages above."
+                Add-Result 'Rokit' 'FAILED' 'rokit.exe missing after self-install'
             }
         }
     }
@@ -481,8 +604,34 @@ try {
     # -----------------------------------------------------------------------
     if ($Do.Skills) {
         Write-Step 'Claude Code skill: graphify (knowledge graph of your project, saves re-reading files)'
-        $null = Install-WingetPackage 'astral-sh.uv' 'uv (Python tool runner)'
-        Update-SessionPath
+        # uv tools (graphify) go in %USERPROFILE%\.local\bin, the folder Claude Code uses too.
+        $uvBin = Join-Path $env:USERPROFILE '.local\bin'
+        if (Test-Command uv) {
+            Write-Ok "uv is already installed ($((Invoke-Native 'uv' @('--version')).Output.Trim()))"
+            Add-Result 'uv (Python tool runner)' 'present' ''
+        }
+        elseif ($DryRun) {
+            Write-Info "DRY RUN: irm $UvInstallUrl | iex   (fallback: winget install astral-sh.uv)"
+            Add-Result 'uv (Python tool runner)' 'dry-run' 'official installer'
+        }
+        else {
+            # Astral's installer puts uv.exe in .local\bin (next to claude.exe) and tells Windows
+            # that PATH changed, so new terminals find it.
+            $null = Invoke-RemoteInstaller $UvInstallUrl 'uv'
+            if (Test-Path (Join-Path $uvBin 'uv.exe')) {
+                if (Add-UserPath $uvBin) { Write-Info "Added $uvBin to your PATH" }
+            }
+            Update-SessionPath
+            if (Test-Command uv) {
+                Write-Ok "uv installed ($((Invoke-Native 'uv' @('--version')).Output.Trim()))"
+                Add-Result 'uv (Python tool runner)' 'installed' $uvBin
+            }
+            else {
+                Write-Warn2 'The uv installer did not produce a working "uv" command. Trying winget ...'
+                $null = Install-WingetPackage 'astral-sh.uv' 'uv (Python tool runner)'
+                Update-SessionPath
+            }
+        }
         $canInstallGraphify = $DryRun -or (Test-Command uv)
         if ($canInstallGraphify) {
             if (Test-Path $GraphifySkillFile) {
@@ -490,15 +639,14 @@ try {
                 Add-Result 'graphify' 'present' $GraphifySkillFile
             }
             elseif ($DryRun) {
-                Write-Info 'DRY RUN: uv tool install graphifyy; graphify install --platform windows'
+                Write-Info "DRY RUN: uv tool install --python $GraphifyPython graphifyy; graphify install --platform windows"
                 Add-Result 'graphify' 'dry-run' 'uv tool install graphifyy'
             }
             else {
-                # PyPI name is graphifyy (two y); the command is graphify. uv downloads Python itself if none exists.
-                Write-Info 'uv tool install graphifyy ... (first run may also download Python; a few minutes)'
-                $r = Invoke-Native 'uv' @('tool', 'install', 'graphifyy')
+                # PyPI name is graphifyy (two y); the command is graphify. uv downloads that Python itself if needed.
+                Write-Info "uv tool install --python $GraphifyPython graphifyy ... (first run may also download Python; a few minutes)"
+                $r = Invoke-Native 'uv' @('tool', 'install', '--python', $GraphifyPython, 'graphifyy')
                 # uv puts tool executables in %USERPROFILE%\.local\bin; make sure that is on the user PATH.
-                $uvBin = Join-Path $env:USERPROFILE '.local\bin'
                 if (Test-Path (Join-Path $uvBin 'graphify.exe')) {
                     if (Add-UserPath $uvBin) { Write-Info "Added $uvBin to your PATH" }
                 }
@@ -675,8 +823,14 @@ else {
 Write-Host ''
 Write-Host '  What to do next' -ForegroundColor Magenta
 Write-Host '  ---------------' -ForegroundColor Magenta
+if ($failed.Count -gt 0) {
+    Write-Host '  0. First fix the FAILED steps in the summary and run this script again. The steps below' -ForegroundColor Yellow
+    Write-Host '     that use rojo or the project folder only work once Rojo is installed.' -ForegroundColor Yellow
+}
 Write-Host '  1. Open Roblox Studio from the Start menu and log in (a free Roblox account is enough).'
 Write-Host '  2. Open a NEW terminal window so the PATH changes apply: Start menu > "Terminal".'
+Write-Host '     Using the terminal inside VS Code? Quit VS Code completely and reopen it.'
+Write-Host '     Still "not recognized"? Sign out of Windows and back in.'
 Write-Host '  3. Run:   claude        then follow the browser login. Claude Code needs a Claude Pro or Max subscription.'
 Write-Host "  4. Run:   cd `"$projectPath`""
 Write-Host '            rojo serve    and leave it running.'

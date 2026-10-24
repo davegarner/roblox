@@ -25,8 +25,9 @@ record what you learn.
 | A Claude **Pro** or **Max** subscription | Claude Code does not work on the free plan | paid, https://claude.ai |
 | About 6 GB of free disk and 20 minutes | installs plus first downloads | |
 
-You do **not** need to be an administrator. Windows will show one or two "allow this app to make
-changes" prompts for Git and VS Code. Click Yes.
+You do **not** need to be an administrator, and it is better not to "Run as administrator":
+per-user tools then install into your own account. Windows will show one or two "allow this app
+to make changes" prompts for Git and VS Code. Click Yes.
 
 ## Run it
 
@@ -63,17 +64,17 @@ one step fails you fix the cause and run it again. Every run writes a log to
 |---|---|---|
 | Git for Windows | version history; also gives Claude Code a Bash shell | `winget install Git.Git` |
 | Visual Studio Code | editor where you read code and run Claude Code side by side | `winget install Microsoft.VisualStudioCode` |
-| Roblox Studio | the game engine and world editor | `winget install Roblox.RobloxStudio` |
+| Roblox Studio | the game engine and world editor | `winget install Roblox.RobloxStudio`; when winget's copy is out of date, Roblox's signed installer from `setup.rbxcdn.com` |
 | Node.js LTS | many Claude Code extras (MCP servers) need it | `winget install OpenJS.NodeJS.LTS` |
 | Claude Code | the AI coding agent | Anthropic's installer `irm https://claude.ai/install.ps1 \| iex` (auto-updates); falls back to `winget install Anthropic.ClaudeCode` |
-| Rokit | installs and version-pins Roblox command-line tools | official `install.ps1` from github.com/rojo-rbx/rokit |
+| Rokit | installs and version-pins Roblox command-line tools | latest release from github.com/rojo-rbx/rokit, then `rokit self-install` (what Rokit's `install.ps1` does) |
 | Rojo | syncs files on disk into Studio; builds place files | `rokit add --global rojo-rbx/rojo` |
 | StyLua | formats Luau code | `rokit add --global JohnnyMorganz/StyLua` |
 | Selene | finds mistakes in Luau code | `rokit add --global Kampfkarren/selene` |
 | Rojo Studio plugin | the Studio end of the sync | `rojo plugin install` |
 | VS Code extensions | Claude Code, luau-lsp, Rojo, StyLua, Selene, roblox-ui | `code --install-extension ...` |
-| uv | runs Python tools without you managing Python; downloads Python itself | `winget install astral-sh.uv` |
-| graphify | knowledge graph of your project; the `/graphify` skill in Claude Code | `uv tool install graphifyy` then `graphify install --platform windows` |
+| uv | runs Python tools without you managing Python; downloads Python itself | Astral's installer `irm https://astral.sh/uv/install.ps1 \| iex`; falls back to `winget install astral-sh.uv` |
+| graphify | knowledge graph of your project; the `/graphify` skill in Claude Code | `uv tool install --python 3.13 graphifyy` then `graphify install --platform windows` |
 | /journal skill | example project skill, copied into the new project | `templates\skills\journal\SKILL.md` to `.claude\skills\journal\` |
 
 ## How the pieces fit together
@@ -214,14 +215,16 @@ The habits below cost minutes and pay for themselves within a week.
 | Symptom | Fix |
 |---|---|
 | `claude` is not recognised | Open a **new** terminal. Still broken? Check `C:\Users\<you>\.local\bin\claude.exe` exists and that folder is on your user PATH. Or run `winget install Anthropic.ClaudeCode`. |
-| `rojo` or `rokit` not recognised | Same: new terminal. Rokit installs to `C:\Users\<you>\.rokit\bin`. On Windows, Rokit may ask for a full restart. |
+| `rojo` or `rokit` not recognised | Same: new terminal. Rokit installs to `C:\Users\<you>\.rokit\bin`. On Windows, Rokit may ask for a full restart. If the setup log says Rokit failed, the `rokit self-install` lines just above the `[FAIL]` say why. |
+| Roblox Studio: "Installer hash does not match" (winget exit code -1978335215) | winget's catalog entry is behind Roblox's latest installer. The script then downloads Roblox's signed installer itself. If that also fails, install Studio from https://create.roblox.com and re-run. |
 | `winget` is not recognised | Microsoft Store > search "App Installer" > Update. Then re-run. |
 | "running scripts is disabled on this system" | Use `Run-Setup.cmd`, or the `-ExecutionPolicy Bypass` command above. |
 | Studio: Rojo button missing | Run `rojo plugin install` in a terminal, then restart Studio. |
 | Studio: Rojo cannot connect | Is `rojo serve` running in the project folder? Default address is `localhost:34872`. |
 | Claude Code says the free plan is not supported | Claude Code needs Pro or Max. Log in at https://claude.ai with that account. |
 | `/graphify` is not in the `/` menu | In a terminal run `graphify install --platform windows`, then restart Claude Code. The skill file should be at `C:\Users\<you>\.claude\skills\graphify\SKILL.md`. |
-| `graphify` or `uv` not recognised | New terminal. uv tools live in `C:\Users\<you>\.local\bin`; run `uv tool update-shell` if that folder is still missing from PATH. |
+| `graphify` or `uv` not recognised | New terminal. In VS Code's terminal, quit and reopen VS Code. Still broken? Sign out of Windows and back in. uv and its tools live in `C:\Users\<you>\.local\bin`; run `uv tool update-shell` if that folder is still missing from PATH. |
+| graphify: "Microsoft Visual C++ 14.0 or greater is required" | uv picked a Python too new for graphify's `tree-sitter` dependency. Run `uv tool install --python 3.13 graphifyy`, then `graphify install --platform windows`. Re-running the setup script does this for you. |
 | `/journal` is not in the `/` menu | Start `claude` from inside the project folder; project skills only load there. Check `.claude\skills\journal\SKILL.md` exists. |
 | Setup failed half way | Read the `[FAIL]` line and the log in `roblox-dev-setup-logs\`. Fix the cause, re-run; done steps are skipped. |
 
