@@ -13,6 +13,9 @@ record what you learn.
 - **Git** so every working version is saved and you can always go back.
 - A first project at `C:\Users\<you>\RobloxProjects\my-first-game` with a `CLAUDE.md` that
   teaches Claude how the project works and a `JOURNAL.md` for your learning log.
+- Two **skills** (reusable instructions Claude loads on demand, see below): **graphify**, which
+  builds a knowledge graph of your project so Claude answers questions from the graph instead of
+  re-reading every file, and **/journal**, which writes the day's log entry for you.
 
 ## Before you start
 
@@ -45,7 +48,10 @@ Useful variations:
 .\Setup-RobloxDev.ps1 -ProjectName obby-game           # name the first project
 .\Setup-RobloxDev.ps1 -Skip Node                       # leave out Node.js
 .\Setup-RobloxDev.ps1 -Skip Studio,Project             # only the tooling
+.\Setup-RobloxDev.ps1 -Skip Skills                     # leave out uv + graphify
 ```
+
+Step names for `-Skip`: Git, VSCode, Studio, Node, Claude, Rokit, Tools, Extensions, Plugin, Skills, Project.
 
 The script is safe to run again. Everything already installed is detected and skipped, so if
 one step fails you fix the cause and run it again. Every run writes a log to
@@ -66,6 +72,9 @@ one step fails you fix the cause and run it again. Every run writes a log to
 | Selene | finds mistakes in Luau code | `rokit add --global Kampfkarren/selene` |
 | Rojo Studio plugin | the Studio end of the sync | `rojo plugin install` |
 | VS Code extensions | Claude Code, luau-lsp, Rojo, StyLua, Selene, roblox-ui | `code --install-extension ...` |
+| uv | runs Python tools without you managing Python; downloads Python itself | `winget install astral-sh.uv` |
+| graphify | knowledge graph of your project; the `/graphify` skill in Claude Code | `uv tool install graphifyy` then `graphify install --platform windows` |
+| /journal skill | example project skill, copied into the new project | `templates\skills\journal\SKILL.md` to `.claude\skills\journal\` |
 
 ## How the pieces fit together
 
@@ -100,6 +109,64 @@ Two things to internalise early:
 7. Press Play (F5) in Studio. View > Output should show `Hello world, from server!`.
 8. Ask Claude: *"Make a part that changes colour when a player touches it. Explain every line."*
    Watch it appear in Studio, play, touch it. You have shipped your first feature.
+9. Type `/graphify .` in Claude Code. It builds the project's knowledge graph. Then try
+   `/graphify query "what runs on the server?"`. From now on, ask questions that way first.
+10. Type `/journal`. Claude drafts today's entry; you fix the "Learned" lines in your own words.
+
+## Skills: teaching Claude something once
+
+A **skill** is a folder holding a `SKILL.md` file: a name, one line saying when to use it, and
+instructions. Claude Code loads it only when it is needed, so a skill costs nothing until it fires.
+You run one by typing `/name`, or Claude picks it up itself when your request matches the description.
+
+| Where the folder lives | Applies to |
+|---|---|
+| `C:\Users\<you>\.claude\skills\<name>\SKILL.md` | every project on your PC |
+| `<project>\.claude\skills\<name>\SKILL.md` | that project only; commit it so it travels with the code |
+| plugins (type `/plugin` inside Claude Code) | bundles of skills from a marketplace, used as `/plugin:skill` |
+
+The kit sets up two.
+
+### /graphify: the primary skill, and the one that saves tokens
+
+[graphify](https://github.com/Graphify-Labs/graphify) turns a folder into a knowledge graph: every
+script, function and module, the links between them, and a plain-English `GRAPH_REPORT.md`. Code is
+parsed locally, so building the graph for code uses no AI budget; Claude only names the clusters.
+The graph lives in `graphify-out\` and survives between sessions.
+
+Why it matters when you pay for a plan: without a graph, every "how does X work?" makes Claude
+search and open files, and every file it reads is spent from your session's token budget. With a
+graph, Claude runs a query and gets back only the handful of connected nodes that matter. Smaller
+context, quicker answers, and far less re-reading as the game grows. `CLAUDE.md` tells Claude to
+check the graph first whenever `graphify-out\` exists.
+
+```
+/graphify .                                 # build or rebuild the graph for this project
+/graphify query "how does scoring work"     # answer from the graph, not by reading every file
+/graphify query "..." --budget 800          # cap the answer at roughly 800 tokens
+/graphify path "RoundTimer" "Leaderstats"   # how two things connect
+/graphify explain "TouchHandler"            # everything connected to one node
+/graphify . --update                        # after a big change, re-extract only what changed
+```
+
+Habits: run `/graphify .` once the project has more than a handful of scripts, `--update` after each
+big feature, and ask questions through it before asking Claude to open files. Optional always-on
+mode: run `graphify claude install` in the project folder once; it adds a section to `CLAUDE.md`
+and a hook so Claude consults the graph without being told.
+
+### /journal: an example you can read in two minutes
+
+The new project contains `.claude\skills\journal\SKILL.md`, a seven-step skill that drafts today's
+`JOURNAL.md` entry from the git log and the conversation, asks you to put the "Learned" lines in your
+own words, then appends it. Open the file. That is all a skill is. Copy it to make your own, for
+example `/test-plan` (write Studio test steps for the last change), `/explain-file` (explain one
+script line by line) or `/commit` (write a plain-English commit message for what changed).
+
+### Finding more
+
+Inside Claude Code: `/plugin marketplace add anthropics/claude-plugins-official`, then `/plugin` to
+browse and install. Claude Code's built-in `/init` writes a first `CLAUDE.md` for any project that
+has none. Docs: https://code.claude.com/docs/en/skills
 
 ## A learning path that works
 
@@ -125,9 +192,9 @@ tutorials at https://create.roblox.com/docs/tutorials.
 
 The habits below cost minutes and pay for themselves within a week.
 
-- **JOURNAL.md, one entry per session.** Built / Learned / Stuck / Next / Commit. Ask Claude
-  to draft it; correct it in your own words. If you cannot explain a concept, you have not
-  learned it yet.
+- **`/journal` at the end of every session.** It drafts the entry (Built / Learned / Stuck / Next /
+  Commit) from the git log and the conversation; you correct the "Learned" lines in your own words.
+  If you cannot explain a concept, you have not learned it yet.
 - **Commit after every working step.** `git add -A && git commit -m "Touch part changes colour"`.
   The commit log becomes the timeline of your learning. Ask Claude: *"write the commit message
   for what we just did"*. Later, `git log --oneline` is a history you can read back.
@@ -153,6 +220,9 @@ The habits below cost minutes and pay for themselves within a week.
 | Studio: Rojo button missing | Run `rojo plugin install` in a terminal, then restart Studio. |
 | Studio: Rojo cannot connect | Is `rojo serve` running in the project folder? Default address is `localhost:34872`. |
 | Claude Code says the free plan is not supported | Claude Code needs Pro or Max. Log in at https://claude.ai with that account. |
+| `/graphify` is not in the `/` menu | In a terminal run `graphify install --platform windows`, then restart Claude Code. The skill file should be at `C:\Users\<you>\.claude\skills\graphify\SKILL.md`. |
+| `graphify` or `uv` not recognised | New terminal. uv tools live in `C:\Users\<you>\.local\bin`; run `uv tool update-shell` if that folder is still missing from PATH. |
+| `/journal` is not in the `/` menu | Start `claude` from inside the project folder; project skills only load there. Check `.claude\skills\journal\SKILL.md` exists. |
 | Setup failed half way | Read the `[FAIL]` line and the log in `roblox-dev-setup-logs\`. Fix the cause, re-run; done steps are skipped. |
 
 ## Optional extras, once the basics feel comfortable

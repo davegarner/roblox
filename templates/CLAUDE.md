@@ -69,10 +69,20 @@ git add -A && git commit -m "..."     # save a checkpoint
 git log --oneline                     # see the history of checkpoints
 ```
 
+## Skills (typed as /name in Claude Code)
+
+- `/graphify` is the primary way to understand this project. If `graphify-out/` exists, answer any
+  "how does X work", "what calls Y" or "where is Z" question with `/graphify query "..."` before
+  opening files. It costs far fewer tokens than reading scripts one by one and keeps the answer focused.
+- If `graphify-out/` does not exist and the project has more than a handful of scripts, suggest
+  running `/graphify .` once. After a big feature, suggest `/graphify . --update`.
+- `/journal` (in `.claude/skills/journal/`) drafts today's `JOURNAL.md` entry. Offer it at the end of a session.
+- If I correct you about the same thing twice, suggest turning the rule into a line in this file or a new skill.
+
 ## Learning log
 
-I keep notes in `JOURNAL.md`. At the end of a session, offer to add a short entry:
-what we built, what I learned, what I got stuck on, what is next.
+I keep notes in `JOURNAL.md`. At the end of a session, offer to run `/journal` so we record
+what we built, what I learned, what I got stuck on, and what is next.
 
 ## Reference
 

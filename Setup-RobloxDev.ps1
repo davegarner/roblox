@@ -13,10 +13,13 @@
       Rokit                  toolchain manager for Roblox command-line tools
       Rojo, StyLua, Selene   file sync into Studio, code formatter, linter (installed through Rokit)
       Rojo Studio plugin     the Roblox Studio side of Rojo
+      uv + graphify          Python tool runner and the /graphify Claude Code skill: a knowledge
+                             graph of your project that Claude queries instead of re-reading files
 
     Then creates a first Rojo project under %USERPROFILE%\RobloxProjects containing:
       CLAUDE.md              tells Claude Code how the project is laid out and how to work in it
       JOURNAL.md             a learning log to fill in as you go
+      .claude\skills\journal example project skill: type /journal to write today's JOURNAL.md entry
       selene.toml            lint config for Roblox
       .vscode\settings.json  format Luau on save
       rokit.toml             pinned tool versions for this project
@@ -32,7 +35,7 @@
 
 .PARAMETER Skip
     Steps to leave out. One or more of:
-    Git, VSCode, Studio, Node, Claude, Rokit, Tools, Extensions, Plugin, Project
+    Git, VSCode, Studio, Node, Claude, Rokit, Tools, Extensions, Plugin, Skills, Project
 
 .PARAMETER DryRun
     Show what would be installed or created without changing anything.
@@ -65,7 +68,7 @@ $ErrorActionPreference = 'Stop'
 
 # -Skip accepts both "-Skip Node,Studio" (one string when launched with -File or from
 # Run-Setup.cmd) and "-Skip Node,Studio" as a real array (when called from PowerShell).
-$AllSteps = @('Git', 'VSCode', 'Studio', 'Node', 'Claude', 'Rokit', 'Tools', 'Extensions', 'Plugin', 'Project')
+$AllSteps = @('Git', 'VSCode', 'Studio', 'Node', 'Claude', 'Rokit', 'Tools', 'Extensions', 'Plugin', 'Skills', 'Project')
 $Skip = @($Skip | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 $unknownSteps = @($Skip | Where-Object { $AllSteps -notcontains $_ })
 if ($unknownSteps.Count -gt 0) {
@@ -81,6 +84,8 @@ if ($unknownSteps.Count -gt 0) {
 # ---------------------------------------------------------------------------
 $ClaudeInstallUrl = 'https://claude.ai/install.ps1'
 $RokitInstallUrl  = 'https://raw.githubusercontent.com/rojo-rbx/rokit/main/scripts/install.ps1'
+# Where `graphify install --platform windows` writes the Claude Code skill.
+$GraphifySkillFile = Join-Path $env:USERPROFILE '.claude\skills\graphify\SKILL.md'
 
 # Command-line tools installed through Rokit. Spec is the GitHub owner/repo.
 $RokitTools = @(
@@ -474,6 +479,56 @@ try {
     }
 
     # -----------------------------------------------------------------------
+    if ($Do.Skills) {
+        Write-Step 'Claude Code skill: graphify (knowledge graph of your project, saves re-reading files)'
+        $null = Install-WingetPackage 'astral-sh.uv' 'uv (Python tool runner)'
+        Update-SessionPath
+        $canInstallGraphify = $DryRun -or (Test-Command uv)
+        if ($canInstallGraphify) {
+            if (Test-Path $GraphifySkillFile) {
+                Write-Ok "graphify skill already installed ($GraphifySkillFile)"
+                Add-Result 'graphify' 'present' $GraphifySkillFile
+            }
+            elseif ($DryRun) {
+                Write-Info 'DRY RUN: uv tool install graphifyy; graphify install --platform windows'
+                Add-Result 'graphify' 'dry-run' 'uv tool install graphifyy'
+            }
+            else {
+                # PyPI name is graphifyy (two y); the command is graphify. uv downloads Python itself if none exists.
+                Write-Info 'uv tool install graphifyy ... (first run may also download Python; a few minutes)'
+                $r = Invoke-Native 'uv' @('tool', 'install', 'graphifyy')
+                # uv puts tool executables in %USERPROFILE%\.local\bin; make sure that is on the user PATH.
+                $uvBin = Join-Path $env:USERPROFILE '.local\bin'
+                if (Test-Path (Join-Path $uvBin 'graphify.exe')) {
+                    if (Add-UserPath $uvBin) { Write-Info "Added $uvBin to your PATH" }
+                }
+                Update-SessionPath
+                if (Test-Command graphify) {
+                    $gi = Invoke-Native 'graphify' @('install', '--platform', 'windows')
+                    if (($gi.ExitCode -eq 0) -and (Test-Path $GraphifySkillFile)) {
+                        Write-Ok 'graphify skill installed for Claude Code (type /graphify inside claude)'
+                        Add-Result 'graphify' 'installed' $GraphifySkillFile
+                    }
+                    else {
+                        Write-Fail "graphify install --platform windows failed (exit $($gi.ExitCode))"
+                        Write-Info (Get-OutputTail $gi.Output)
+                        Add-Result 'graphify' 'FAILED' "graphify install exit $($gi.ExitCode)"
+                    }
+                }
+                else {
+                    Write-Fail "uv tool install graphifyy did not produce a graphify command (uv exit $($r.ExitCode))"
+                    Write-Info (Get-OutputTail $r.Output)
+                    Add-Result 'graphify' 'FAILED' "uv exit $($r.ExitCode)"
+                }
+            }
+        }
+        else {
+            Write-Warn2 'uv is not available, so graphify was not installed. Re-run after uv installs.'
+            Add-Result 'graphify' 'SKIPPED' 'uv missing'
+        }
+    }
+
+    # -----------------------------------------------------------------------
     if ($Do.Project) {
         Write-Step "First project: $projectPath"
         if (Test-Path $projectPath) {
@@ -481,9 +536,9 @@ try {
             Add-Result 'Project' 'present' $projectPath
         }
         elseif ($DryRun) {
-            Write-Info "DRY RUN: rojo init `"$projectPath`"; copy templates\CLAUDE.md + JOURNAL.md; write selene.toml + .vscode\settings.json; rokit init + add tools; rojo build; git commit"
+            Write-Info "DRY RUN: rojo init `"$projectPath`"; copy templates\CLAUDE.md + JOURNAL.md + skills\journal; write selene.toml + .vscode\settings.json; rokit init + add tools; rojo build; git commit"
             $templateDir = Join-Path $PSScriptRoot 'templates'
-            foreach ($name in 'CLAUDE.md', 'JOURNAL.md') {
+            foreach ($name in 'CLAUDE.md', 'JOURNAL.md', 'skills\journal\SKILL.md') {
                 if (Test-Path (Join-Path $templateDir $name)) { Write-Ok "template found: templates\$name" }
                 else { Write-Warn2 "template missing: templates\$name (project would be created without it)" }
             }
@@ -536,6 +591,18 @@ try {
 '@
                 Set-Content -Path (Join-Path $vscodeDir 'settings.json') -Value $settings -Encoding Ascii
                 Write-Ok 'Added selene.toml and .vscode\settings.json'
+
+                # Example project-level skill: /journal drafts today's JOURNAL.md entry.
+                $skillSrc = Join-Path $templateDir 'skills\journal\SKILL.md'
+                if (Test-Path $skillSrc) {
+                    $skillDir = Join-Path $projectPath '.claude\skills\journal'
+                    New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
+                    Copy-Item -Path $skillSrc -Destination (Join-Path $skillDir 'SKILL.md') -Force
+                    Write-Ok 'Added .claude\skills\journal\SKILL.md (type /journal inside claude)'
+                }
+                else {
+                    Write-Warn2 "Template not found, skipped: $skillSrc"
+                }
 
                 Push-Location $projectPath
                 try {
@@ -618,6 +685,9 @@ Write-Host '     then Plugins tab > Rojo > Connect.'
 Write-Host '  6. In a second terminal in the project folder run:   claude'
 Write-Host '     and ask: "Read CLAUDE.md and explain how this project is set up."'
 Write-Host '  7. In Studio press Play (F5). View > Output should show "Hello world, from server!".'
+Write-Host '  8. Once the project has a few scripts, type in claude:   /graphify .'
+Write-Host '     then ask questions with:   /graphify query "how does scoring work"'
+Write-Host '  9. End every session with:   /journal'
 Write-Host ''
 Write-Host "  Full log: $logFile"
 Write-Host ''
